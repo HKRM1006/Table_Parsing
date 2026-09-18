@@ -44,13 +44,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import os
+from pymupdf import Rect
 from typing import Any, Optional
 import json
 from html.parser import HTMLParser
 import xml.etree.ElementTree as ET
 from PIL import Image
 from pathlib import Path
-
+import numpy as np
+from collections import defaultdict
 
 ANNOTATION_LEVELS = ("detection_only", "structure", "full")
 
@@ -164,6 +166,431 @@ class Converter(ABC):
         print(f"Ghi dữ liệu thành công vào {out_path}")
         return out_path
 
+class PubTables1MHtmlConstructor:
+    id2label = {
+        0: 'table', 
+        1: 'table column', 
+        2: 'table row', 
+        3: 'table column header', 
+        4: 'table projected row header', 
+        5: 'table spanning cell'
+    }
+    def iob(self, a, b):
+        a = np.array(a)
+        b = np.array(b)
+        if len(a.shape) == 1:
+            a = a[np.newaxis, :]
+        if len(b.shape) == 1:
+            b = b[np.newaxis, :]
+
+        xA = np.maximum(a[:,0], b[:,0])
+        yA = np.maximum(a[:,1], b[:,1])
+        xB = np.minimum(a[:,2], b[:,2])
+        yB = np.minimum(a[:,3], b[:,3])
+        interArea = np.maximum(0, xB - xA) * np.maximum(0, yB - yA)
+        boxAArea = (a[:,2] - a[:,0]) * (a[:,3] - a[:,1])
+        boxBArea = (b[:,2] - b[:,0]) * (b[:,3] - b[:,1])
+        return interArea / (boxAArea)
+
+    def sort_rows(self, objs):
+        # sắp xếp theo độ cao điểm giữa của ô
+        return sorted(objs, key=lambda k: k['bbox'][1] + k['bbox'][3])
+
+    def sort_cols(self, objs):
+        # sắp xếp theo độ cao điểm giữa của ô
+        return sorted(objs, key=lambda k: k['bbox'][0] + k['bbox'][2])
+
+    def align_columns(self, columns, bbox):
+        for column in columns:
+            column['bbox'][1] = bbox[1]
+            column['bbox'][3] = bbox[3]
+        return columns
+
+
+    def align_rows(self, rows, bbox):
+        for row in rows:
+            row['bbox'][0] = bbox[0]
+            row['bbox'][2] = bbox[2]
+        return rows
+
+    def align_headers(self, headers, rows):
+        aligned_headers = []
+        for row in rows:
+            row['header'] = False
+        header_row_nums = []
+        for header in headers:
+            for row_num, row in enumerate(rows):
+                row_height = row['bbox'][3] - row['bbox'][1]
+                min_row_overlap = max(row['bbox'][1], header['bbox'][1])
+                max_row_overlap = min(row['bbox'][3], header['bbox'][3])
+                overlap_height = max_row_overlap - min_row_overlap
+                if overlap_height / row_height >= 0.5:
+                    header_row_nums.append(row_num)
+
+        if len(header_row_nums) == 0:
+            return aligned_headers
+
+        header_rect = Rect()
+        if header_row_nums[0] > 0:
+            header_row_nums = list(range(header_row_nums[0]+1)) + header_row_nums
+
+        last_row_num = -1
+        for row_num in header_row_nums:
+            if row_num == last_row_num + 1:
+                row = rows[row_num]
+                row['header'] = True
+                header_rect = header_rect.include_rect(row['bbox'])
+                last_row_num = row_num
+            else:
+                break
+
+        header = {'bbox': list(header_rect)}
+        aligned_headers.append(header)
+
+        return aligned_headers
+    
+    def align_supercells(self, supercells, rows, columns):
+        aligned_supercells = []
+
+        for supercell in supercells:
+            supercell['header'] = False
+            row_bbox_rect = None
+            col_bbox_rect = None
+            intersecting_header_rows = set()
+            intersecting_data_rows = set()
+            for row_num, row in enumerate(rows):
+                row_height = row['bbox'][3] - row['bbox'][1]
+                supercell_height = supercell['bbox'][3] - supercell['bbox'][1]
+                min_row_overlap = max(row['bbox'][1], supercell['bbox'][1])
+                max_row_overlap = min(row['bbox'][3], supercell['bbox'][3])
+                overlap_height = max_row_overlap - min_row_overlap
+                if 'span' in supercell:
+                    overlap_fraction = max(overlap_height/row_height,
+                                        overlap_height/supercell_height)
+                else:
+                    overlap_fraction = overlap_height / row_height
+                if overlap_fraction >= 0.5:
+                    if 'header' in row and row['header']:
+                        intersecting_header_rows.add(row_num)
+                    else:
+                        intersecting_data_rows.add(row_num)
+
+            supercell['header'] = False
+            if len(intersecting_data_rows) > 0 and len(intersecting_header_rows) > 0:
+                if len(intersecting_data_rows) > len(intersecting_header_rows):
+                    intersecting_header_rows = set()
+                else:
+                    intersecting_data_rows = set()
+            if len(intersecting_header_rows) > 0:
+                supercell['header'] = True
+            elif 'span' in supercell:
+                continue # Require span supercell to be in the header
+            intersecting_rows = intersecting_data_rows.union(intersecting_header_rows)
+            # Determine vertical span of aligned supercell
+            for row_num in intersecting_rows:
+                if row_bbox_rect is None:
+                    row_bbox_rect = Rect(rows[row_num]['bbox'])
+                else:
+                    row_bbox_rect = row_bbox_rect.include_rect(rows[row_num]['bbox'])
+            if row_bbox_rect is None:
+                continue
+
+            intersecting_cols = []
+            for col_num, col in enumerate(columns):
+                col_width = col['bbox'][2] - col['bbox'][0]
+                supercell_width = supercell['bbox'][2] - supercell['bbox'][0]
+                min_col_overlap = max(col['bbox'][0], supercell['bbox'][0])
+                max_col_overlap = min(col['bbox'][2], supercell['bbox'][2])
+                overlap_width = max_col_overlap - min_col_overlap
+                if 'span' in supercell:
+                    overlap_fraction = max(overlap_width/col_width,
+                                        overlap_width/supercell_width)
+                    # Multiply by 2 effectively lowers the threshold to 0.25
+                    if supercell['header']:
+                        overlap_fraction = overlap_fraction * 2
+                else:
+                    overlap_fraction = overlap_width / col_width
+                if overlap_fraction >= 0.5:
+                    intersecting_cols.append(col_num)
+                    if col_bbox_rect is None:
+                        col_bbox_rect = Rect(col['bbox'])
+                    else:
+                        col_bbox_rect = col_bbox_rect.include_rect(col['bbox'])
+            if col_bbox_rect is None:
+                continue
+
+            supercell_bbox = list(row_bbox_rect.intersect(col_bbox_rect))
+            supercell['bbox'] = supercell_bbox
+
+            # Only a true supercell if it joins across multiple rows or columns
+            if (len(intersecting_rows) > 0 and len(intersecting_cols) > 0
+                    and (len(intersecting_rows) > 1 or len(intersecting_cols) > 1)):
+                supercell['row_numbers'] = list(intersecting_rows)
+                supercell['column_numbers'] = intersecting_cols
+                aligned_supercells.append(supercell)
+
+                # A span supercell in the header means there must be supercells above it in the header
+                if 'span' in supercell and supercell['header'] and len(supercell['column_numbers']) > 1:
+                    for row_num in range(0, min(supercell['row_numbers'])):
+                        new_supercell = {'row_numbers': [row_num], 'column_numbers': supercell['column_numbers'],
+                                        'score': supercell['score'], 'propagated': True}
+                        new_supercell_columns = [columns[idx] for idx in supercell['column_numbers']]
+                        new_supercell_rows = [rows[idx] for idx in supercell['row_numbers']]
+                        bbox = [min([column['bbox'][0] for column in new_supercell_columns]),
+                                min([row['bbox'][1] for row in new_supercell_rows]),
+                                max([column['bbox'][2] for column in new_supercell_columns]),
+                                max([row['bbox'][3] for row in new_supercell_rows])]
+                        new_supercell['bbox'] = bbox
+                        aligned_supercells.append(new_supercell)
+
+        return aligned_supercells
+
+    def refine_table_structure(self, table_structure):
+        rows = table_structure["rows"]
+        columns = table_structure['columns']
+
+        # Process the headers
+        column_headers = table_structure['column headers']
+        column_headers = self.align_headers(column_headers, rows)
+
+        # Process spanning cells
+        spanning_cells = [elem for elem in table_structure['spanning cells'] if not elem['projected row header']]
+        projected_row_headers = [elem for elem in table_structure['spanning cells'] if elem['projected row header']]
+
+        spanning_cells += projected_row_headers
+        spanning_cells = self.align_supercells(spanning_cells, rows, columns)
+
+        table_structure['columns'] = columns
+        table_structure['rows'] = rows
+        table_structure['spanning cells'] = spanning_cells
+        table_structure['column headers'] = column_headers
+
+        return table_structure
+
+    def ground_truth_to_structure(self, gb, gl):
+        if len(gb) != len(gl):
+            raise ValueError("Num of bbox and num of label not match!")
+        # Convert từ các list thành các object
+        objects = [
+            {
+                'score': 1,
+                'bbox': bbox,
+                'label': label
+            } 
+            for bbox, label in zip(gb, gl) 
+        ]
+
+        tables = [obj for obj in objects if obj['label'] == 'table']
+        table_structures = []
+        for table in tables:
+            table_objects = [obj for obj in objects if self.iob([obj['bbox']], [table['bbox']])[0] >= 0.5]
+            structure = {}
+    
+            columns = [obj for obj in table_objects if obj['label'] == 'table column']
+            rows = [obj for obj in table_objects if obj['label'] == 'table row']
+            column_headers = [obj for obj in table_objects if obj['label'] == 'table column header']
+            spanning_cells = [obj for obj in table_objects if obj['label'] == 'table spanning cell']
+            for obj in spanning_cells:
+                obj['projected row header'] = False
+            projected_row_headers = [obj for obj in table_objects if obj['label'] == 'table projected row header']
+            for obj in projected_row_headers:
+                obj['projected row header'] = True
+            spanning_cells += projected_row_headers
+            for obj in rows:
+                obj['column header'] = False
+                for header_obj in column_headers:
+                    if self.iob([obj['bbox']], [header_obj['bbox']])[0] >= 0.5:
+                        obj['column header'] = True
+    
+            # Refine table structures
+            rows = self.sort_rows(rows)
+            columns = self.sort_cols(columns)
+    
+            # Shrink table bbox to just the total height of the rows
+            # and the total width of the columns
+            row_rect = Rect()
+            for obj in rows:
+                row_rect.include_rect(obj['bbox'])
+            column_rect = Rect()
+            for obj in columns:
+                column_rect.include_rect(obj['bbox'])
+            table['row_column_bbox'] = [column_rect[0], row_rect[1], column_rect[2], row_rect[3]]
+            table['bbox'] = table['row_column_bbox']
+    
+            columns = self.align_columns(columns, table['row_column_bbox'])
+            rows = self.align_rows(rows, table['row_column_bbox'])
+    
+            structure['rows'] = rows
+            structure['columns'] = columns
+            structure['column headers'] = column_headers
+            structure['spanning cells'] = spanning_cells
+    
+            if len(rows) > 0 and len(columns) > 1:
+                structure = self.refine_table_structure(structure)
+            table_structures.append(structure)
+        return table_structures
+
+    def structure_to_cells(self, table_structure):
+        """
+        Assuming the row, column, spanning cell, and header bounding boxes have
+        been refined into a set of consistent table structures, process these
+        table structures into table cells. This is a universal representation
+        format for the table, which can later be exported to Pandas or CSV formats.
+        Classify the cells as header/access cells or data cells
+        based on if they intersect with the header bounding box.
+        """
+        columns = table_structure['columns']
+        rows = table_structure['rows']
+        spanning_cells = table_structure['spanning cells']
+        cells = []
+        subcells = []
+
+        # Identify complete cells and subcells
+        for column_num, column in enumerate(columns):
+            for row_num, row in enumerate(rows):
+                column_rect = Rect(list(column['bbox']))
+                row_rect = Rect(list(row['bbox']))
+                cell_rect = row_rect.intersect(column_rect)
+                header = 'column header' in row and row['column header']
+                cell = {'bbox': list(cell_rect), 'column_nums': [column_num], 'row_nums': [row_num],
+                        'column header': header}
+
+                cell['subcell'] = False
+                for spanning_cell in spanning_cells:
+                    spanning_cell_rect = Rect(list(spanning_cell['bbox']))
+                    if (spanning_cell_rect.intersect(cell_rect).get_area()
+                            / cell_rect.get_area()) > 0.5:
+                        cell['subcell'] = True
+                        break
+
+                if cell['subcell']:
+                    subcells.append(cell)
+                else:
+                    #cell text = extract_text_inside_bbox(table_spans, cell['bbox'])
+                    #cell['cell text'] = cell text
+                    cell['projected row header'] = False
+                    cells.append(cell)
+
+        for spanning_cell in spanning_cells:
+            spanning_cell_rect = Rect(list(spanning_cell['bbox']))
+            cell_columns = set()
+            cell_rows = set()
+            cell_rect = None
+            header = True
+            for subcell in subcells:
+                subcell_rect = Rect(list(subcell['bbox']))
+                subcell_rect_area = subcell_rect.get_area()
+                if (subcell_rect.intersect(spanning_cell_rect).get_area()
+                        / subcell_rect_area) > 0.5:
+                    if cell_rect is None:
+                        cell_rect = Rect(list(subcell['bbox']))
+                    else:
+                        cell_rect.include_rect(Rect(list(subcell['bbox'])))
+                    cell_rows = cell_rows.union(set(subcell['row_nums']))
+                    cell_columns = cell_columns.union(set(subcell['column_nums']))
+                    # By convention here, all subcells must be classified
+                    # as header cells for a spanning cell to be classified as a header cell;
+                    # otherwise, this could lead to a non-rectangular header region
+                    header = header and 'column header' in subcell and subcell['column header']
+            if len(cell_rows) > 0 and len(cell_columns) > 0:
+                cell = {'bbox': list(cell_rect), 'column_nums': list(cell_columns), 'row_nums': list(cell_rows),
+                        'column header': header, 'projected row header': spanning_cell['projected row header']}
+                cells.append(cell)
+
+        # Dilate rows and columns before final extraction
+        #dilated_columns = fill_column_gaps(columns, table_bbox)
+        dilated_columns = columns
+        #dilated_rows = fill_row_gaps(rows, table_bbox)
+        dilated_rows = rows
+        for cell in cells:
+            column_rect = Rect()
+            for column_num in cell['column_nums']:
+                column_rect.include_rect(list(dilated_columns[column_num]['bbox']))
+            row_rect = Rect()
+            for row_num in cell['row_nums']:
+                row_rect.include_rect(list(dilated_rows[row_num]['bbox']))
+            cell_rect = column_rect.intersect(row_rect)
+            cell['bbox'] = list(cell_rect)
+            
+        # Adjust the row, column, and cell bounding boxes to reflect the extracted text
+        num_rows = len(rows)
+        rows = self.sort_rows(rows)
+        num_columns = len(columns)
+        columns = self.sort_cols(columns)
+        min_y_values_by_row = defaultdict(list)
+        max_y_values_by_row = defaultdict(list)
+        min_x_values_by_column = defaultdict(list)
+        max_x_values_by_column = defaultdict(list)
+        for cell in cells:
+            min_row = min(cell["row_nums"])
+            max_row = max(cell["row_nums"])
+            min_column = min(cell["column_nums"])
+            max_column = max(cell["column_nums"])
+        for row_num, row in enumerate(rows):
+            if len(min_x_values_by_column[0]) > 0:
+                row['bbox'][0] = min(min_x_values_by_column[0])
+            if len(min_y_values_by_row[row_num]) > 0:
+                row['bbox'][1] = min(min_y_values_by_row[row_num])
+            if len(max_x_values_by_column[num_columns-1]) > 0:
+                row['bbox'][2] = max(max_x_values_by_column[num_columns-1])
+            if len(max_y_values_by_row[row_num]) > 0:
+                row['bbox'][3] = max(max_y_values_by_row[row_num])
+        for column_num, column in enumerate(columns):
+            if len(min_x_values_by_column[column_num]) > 0:
+                column['bbox'][0] = min(min_x_values_by_column[column_num])
+            if len(min_y_values_by_row[0]) > 0:
+                column['bbox'][1] = min(min_y_values_by_row[0])
+            if len(max_x_values_by_column[column_num]) > 0:
+                column['bbox'][2] = max(max_x_values_by_column[column_num])
+            if len(max_y_values_by_row[num_rows-1]) > 0:
+                column['bbox'][3] = max(max_y_values_by_row[num_rows-1])
+        for cell in cells:
+            row_rect = Rect()
+            column_rect = Rect()
+            for row_num in cell['row_nums']:
+                row_rect.include_rect(list(rows[row_num]['bbox']))
+            for column_num in cell['column_nums']:
+                column_rect.include_rect(list(columns[column_num]['bbox']))
+            cell_rect = row_rect.intersect(column_rect)
+            if cell_rect.get_area() > 0:
+                cell['bbox'] = list(cell_rect)
+                pass
+        return cells
+
+    def cells_to_html(self, cells):
+        cells = sorted(cells, key=lambda k: min(k['column_nums']))
+        cells = sorted(cells, key=lambda k: min(k['row_nums']))
+
+        table = ET.Element("table")
+        current_row = -1
+
+        for cell in cells:
+            this_row = min(cell['row_nums'])
+
+            attrib = {}
+            colspan = len(cell['column_nums'])
+            if colspan > 1:
+                attrib['colspan'] = str(colspan)
+            rowspan = len(cell['row_nums'])
+            if rowspan > 1:
+                attrib['rowspan'] = str(rowspan)
+            if this_row > current_row:
+                current_row = this_row
+                if cell['column header']:
+                    cell_tag = "th"
+                    row = ET.SubElement(table, "thead")
+                else:
+                    cell_tag = "td"
+                    row = ET.SubElement(table, "tr")
+            tcell = ET.SubElement(row, cell_tag, attrib=attrib)
+
+        return str(ET.tostring(table, encoding="unicode", short_empty_elements=False))
+
+    def construct(self, gb, gl):
+        table_structure = self.ground_truth_to_structure(gb, gl)
+        tables_cells = [self.structure_to_cells(structure) for structure in table_structure]
+        tables_htmls = [self.cells_to_html(cells) for cells in tables_cells]
+        return tables_htmls
 
 class PubTables1MConverter(Converter):
     """
@@ -176,7 +603,7 @@ class PubTables1MConverter(Converter):
     """
 
     dataset_name = "PubTables-1M"
-
+    html_constructor = PubTables1MHtmlConstructor()
     def convert(self) -> list[dict[str, Any]]:
         raw_path = self.raw_dir
         records: list[dict[str, Any]] = []
@@ -204,7 +631,8 @@ class PubTables1MConverter(Converter):
                 alt = raw_path / "images" / filename
                 if alt.exists():
                     image_path = alt
-
+            bboxs = []
+            labels = []
             table_bbox: Optional[list[float]] = None
             rows_bboxes: list[list[float]] = []
             cols_bboxes: list[list[float]] = []
@@ -226,6 +654,8 @@ class PubTables1MConverter(Converter):
                         float(bndbox.find("xmax").text),
                         float(bndbox.find("ymax").text),
                     ]
+                    bboxs.append(bbox)
+                    labels.append(name)
                 except (AttributeError, TypeError, ValueError):
                     continue
 
@@ -338,7 +768,7 @@ class PubTables1MConverter(Converter):
                 num_rows=num_rows,
                 num_cols=num_cols,
                 cells=cells,
-                structure_sequence=None,
+                structure_sequence=self.html_constructor.construct(bboxs, labels)[0],
                 quality_flags={
                     "multi_line_text": False,
                     "skewed": False,
@@ -350,7 +780,6 @@ class PubTables1MConverter(Converter):
 
         print(f"[{self.dataset_name}] Đã xử lý thành công {len(records)} bảng.")
         return records
-
 
 class FinTabNetHTMLParser(HTMLParser):
     """Parse HTML structure tokens của FinTabNet để lấy (row_start, row_end, col_start, col_end, is_header)."""
