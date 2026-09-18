@@ -1,0 +1,10 @@
+{
+    "mAP50": 0.995029444370142,
+    "total_precision": 0.9983837315231127,
+    "total_recall": 0.9986918882372826,
+    "AP50_per_class": {
+        "table": 0.9900588887402839,
+        "table rotated": 1.0
+    },
+    "Time per sample": 0.04433
+}

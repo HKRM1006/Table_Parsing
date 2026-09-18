@@ -1,0 +1,14 @@
+{
+    "mAP50": 0.9538675690098825,
+    "total_precision": 0.9609370755458301,
+    "total_recall": 0.979563579973416,
+    "AP50_per_class": {
+        "table": 0.9900974247280634,
+        "table column": 0.990023593460897,
+        "table row": 0.9794202212280279,
+        "table column header": 0.9874106748460221,
+        "table projected row header": 0.9188631258592314,
+        "table spanning cell": 0.8573903739370525
+    },
+    "TEDS": 0.9781192391002764
+}

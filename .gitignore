@@ -61,6 +61,9 @@ crops/
 *.json
 *.html
 *.tex
+*.jsonl
+!benchmark_result/*.json
+!benchmark_result/*.jsonl
 
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
@@ -79,3 +82,4 @@ Thumbs.db
 .env
 .env.local
 secrets.json
+
