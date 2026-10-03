@@ -65,6 +65,8 @@ crops/
 !benchmark_result/*.json
 !benchmark_result/*.jsonl
 
+
+test*
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
 

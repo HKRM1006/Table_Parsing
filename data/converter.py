@@ -599,11 +599,75 @@ class PubTables1MConverter(Converter):
       table column header, table projected row header.
     - Grid cell 1x1 được suy ra từ giao của row bbox ∩ column bbox.
     - Spanning cell ghi đè các grid cell nằm trong vùng span.
+    - is_header: ô nằm (chủ yếu) trong vùng `table column header` hoặc
+      `table projected row header` thì được đánh dấu header.
     - Ảnh structure thường là cropped table → 1 table / file.
     """
 
     dataset_name = "PubTables-1M"
     html_constructor = PubTables1MHtmlConstructor()
+
+    # Tỉ lệ diện tích của ô nằm trong vùng header để coi ô đó là header
+    HEADER_OVERLAP_THRESHOLD = 0.5
+
+    TABLE_NAMES = ("table",)
+    ROW_NAMES = ("table row", "row")
+    COL_NAMES = ("table column", "column")
+    SPAN_NAMES = ("table spanning cell", "spanning cell")
+    COLUMN_HEADER_NAMES = ("table column header", "column header")
+    PROJECTED_ROW_HEADER_NAMES = (
+        "table projected row header",
+        "projected row header",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _overlap_ratio(inner: list[float], outer: list[float]) -> float:
+        """Phần diện tích của `inner` nằm trong `outer` (0..1)."""
+        x1, y1 = max(inner[0], outer[0]), max(inner[1], outer[1])
+        x2, y2 = min(inner[2], outer[2]), min(inner[3], outer[3])
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        area = max((inner[2] - inner[0]) * (inner[3] - inner[1]), 1e-6)
+        return (x2 - x1) * (y2 - y1) / area
+
+    def _mark_headers(
+        self,
+        cells: list[dict[str, Any]],
+        column_headers: list[list[float]],
+        projected_row_headers: list[list[float]],
+    ) -> None:
+        """Gán is_header cho các ô dựa trên vùng column header / projected row header."""
+        regions = column_headers + projected_row_headers
+        if not regions:
+            return
+        for cell in cells:
+            cell["is_header"] = any(
+                self._overlap_ratio(cell["bbox"], region)
+                >= self.HEADER_OVERLAP_THRESHOLD
+                for region in regions
+            )
+
+    def _resolve_image_path(self, raw_path, xml_path, root):
+        filename_node = root.find("filename")
+        filename = (
+            filename_node.text
+            if filename_node is not None and filename_node.text
+            else xml_path.with_suffix(".jpg").name
+        )
+        # Ảnh có thể nằm cùng thư mục hoặc trong images/
+        image_path = raw_path / filename
+        if not image_path.exists():
+            alt = raw_path / "images" / filename
+            if alt.exists():
+                image_path = alt
+        return image_path
+
+    # ------------------------------------------------------------------ #
+    # Main
+    # ------------------------------------------------------------------ #
     def convert(self) -> list[dict[str, Any]]:
         raw_path = self.raw_dir
         records: list[dict[str, Any]] = []
@@ -614,36 +678,28 @@ class PubTables1MConverter(Converter):
 
         for xml_path in xml_files:
             try:
-                tree = ET.parse(xml_path)
-                root = tree.getroot()
+                root = ET.parse(xml_path).getroot()
             except ET.ParseError:
                 continue
 
-            filename_node = root.find("filename")
-            filename = (
-                filename_node.text
-                if filename_node is not None and filename_node.text
-                else xml_path.with_suffix(".jpg").name
-            )
-            # Ảnh có thể nằm cùng thư mục hoặc trong images/
-            image_path = raw_path / filename
-            if not image_path.exists():
-                alt = raw_path / "images" / filename
-                if alt.exists():
-                    image_path = alt
-            bboxs = []
-            labels = []
+            image_path = self._resolve_image_path(raw_path, xml_path, root)
+
+            bboxs: list[list[float]] = []
+            labels: list[str] = []
+
             table_bbox: Optional[list[float]] = None
             rows_bboxes: list[list[float]] = []
             cols_bboxes: list[list[float]] = []
             spanning_cells: list[list[float]] = []
-            header_rows: set[int] = set()  # optional, từ column header / projected row header
+            column_headers: list[list[float]] = []
+            projected_row_headers: list[list[float]] = []
 
             for obj in root.findall("object"):
                 name_node = obj.find("name")
                 if name_node is None or name_node.text is None:
                     continue
                 name = name_node.text.strip().lower()
+
                 bndbox = obj.find("bndbox")
                 if bndbox is None:
                     continue
@@ -654,20 +710,24 @@ class PubTables1MConverter(Converter):
                         float(bndbox.find("xmax").text),
                         float(bndbox.find("ymax").text),
                     ]
-                    bboxs.append(bbox)
-                    labels.append(name)
                 except (AttributeError, TypeError, ValueError):
                     continue
 
-                if name == "table":
+                bboxs.append(bbox)
+                labels.append(name)
+
+                if name in self.TABLE_NAMES:
                     table_bbox = bbox
-                elif name in ("table row", "row"):
+                elif name in self.ROW_NAMES:
                     rows_bboxes.append(bbox)
-                elif name in ("table column", "column"):
+                elif name in self.COL_NAMES:
                     cols_bboxes.append(bbox)
-                elif name in ("table spanning cell", "spanning cell"):
+                elif name in self.SPAN_NAMES:
                     spanning_cells.append(bbox)
-                # column header / projected row header chỉ dùng để đánh dấu is_header (nếu có)
+                elif name in self.COLUMN_HEADER_NAMES:
+                    column_headers.append(bbox)
+                elif name in self.PROJECTED_ROW_HEADER_NAMES:
+                    projected_row_headers.append(bbox)
 
             if table_bbox is None and (rows_bboxes or cols_bboxes):
                 # Fallback: union của rows + cols
@@ -691,17 +751,18 @@ class PubTables1MConverter(Converter):
 
             if num_rows == 0 or num_cols == 0:
                 # Không đủ structure → chỉ giữ detection
-                record = self._build_record(
-                    image_id=xml_path.stem,
-                    image_path=image_path.resolve(),
-                    table_id=table_id_counter,
-                    annotation_level="detection_only",
-                    table_bbox=table_bbox,
-                    num_rows=0,
-                    num_cols=0,
-                    cells=[],
+                records.append(
+                    self._build_record(
+                        image_id=xml_path.stem,
+                        image_path=image_path.resolve(),
+                        table_id=table_id_counter,
+                        annotation_level="detection_only",
+                        table_bbox=table_bbox,
+                        num_rows=0,
+                        num_cols=0,
+                        cells=[],
+                    )
                 )
-                records.append(record)
                 table_id_counter += 1
                 continue
 
@@ -711,13 +772,12 @@ class PubTables1MConverter(Converter):
             ]
             for r, r_bbox in enumerate(rows_bboxes):
                 for c, c_bbox in enumerate(cols_bboxes):
-                    inter = self._intersect_bbox(r_bbox, c_bbox)
                     grid[r][c] = {
                         "row_start": r,
                         "row_end": r,
                         "col_start": c,
                         "col_end": c,
-                        "bbox": inter,
+                        "bbox": self._intersect_bbox(r_bbox, c_bbox),
                         "is_header": False,
                         "text": None,
                     }
@@ -736,10 +796,11 @@ class PubTables1MConverter(Converter):
                 ]
                 if not overlapping_rows or not overlapping_cols:
                     continue
+
                 rs, re = min(overlapping_rows), max(overlapping_rows)
                 cs, ce = min(overlapping_cols), max(overlapping_cols)
 
-                # Đánh dấu các ô bị span (giữ ô top-left, xoá các ô còn lại)
+                # Giữ ô top-left làm ô span, xoá các ô còn lại (đã bị merge)
                 cell = {
                     "row_start": rs,
                     "row_end": re,
@@ -751,31 +812,34 @@ class PubTables1MConverter(Converter):
                 }
                 for rr in range(rs, re + 1):
                     for cc in range(cs, ce + 1):
-                        if rr == rs and cc == cs:
-                            grid[rr][cc] = cell
-                        else:
-                            grid[rr][cc] = None  # đã bị merge
+                        grid[rr][cc] = cell if (rr == rs and cc == cs) else None
 
             # 3. Flatten cells (bỏ None)
             cells = [cell for row in grid for cell in row if cell is not None]
 
-            record = self._build_record(
-                image_id=xml_path.stem,
-                image_path=image_path.resolve(),
-                table_id=table_id_counter,
-                annotation_level="structure",
-                table_bbox=table_bbox,
-                num_rows=num_rows,
-                num_cols=num_cols,
-                cells=cells,
-                structure_sequence=self.html_constructor.construct(bboxs, labels)[0],
-                quality_flags={
-                    "multi_line_text": False,
-                    "skewed": False,
-                    "handwritten": False,
-                },
+            # 4. Đánh dấu header (phải chạy sau khi gộp span vì span có bbox riêng)
+            self._mark_headers(cells, column_headers, projected_row_headers)
+
+            records.append(
+                self._build_record(
+                    image_id=xml_path.stem,
+                    image_path=image_path.resolve(),
+                    table_id=table_id_counter,
+                    annotation_level="structure",
+                    table_bbox=table_bbox,
+                    num_rows=num_rows,
+                    num_cols=num_cols,
+                    cells=cells,
+                    structure_sequence=self.html_constructor.construct(
+                        bboxs, labels
+                    )[0],
+                    quality_flags={
+                        "multi_line_text": False,
+                        "skewed": False,
+                        "handwritten": False,
+                    },
+                )
             )
-            records.append(record)
             table_id_counter += 1
 
         print(f"[{self.dataset_name}] Đã xử lý thành công {len(records)} bảng.")
@@ -1494,3 +1558,11 @@ def get_converter(name: str, raw_dir: str | Path, output_dir: str | Path) -> Con
     if name not in CONVERTERS:
         raise KeyError(f"Unknown dataset: {name}. Available: {list(CONVERTERS)}")
     return CONVERTERS[name](raw_dir, output_dir)
+
+if __name__ == "__main__":
+    converter = PubTables1MConverter(
+        raw_dir=r"data\raw\PubTables-1M-Structure_Annotations_Train",
+        output_dir=r"data\processed\PubTables-1M-Structure_Annotations_Train"
+    )
+    record = converter.convert()
+    converter.save(record)
