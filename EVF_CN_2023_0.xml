@@ -1,0 +1,80 @@
+<annotation>
+  <filename />
+  <size>
+    <width>1159</width>
+    <height>191</height>
+    <depth>3</depth>
+  </size>
+  <object>
+    <name>table</name>
+    <bndbox>
+      <xmin>0</xmin>
+      <ymin>0</ymin>
+      <xmax>1159</xmax>
+      <ymax>191</ymax>
+    </bndbox>
+  </object>
+  <object>
+    <name>table row</name>
+    <bndbox>
+      <xmin>0</xmin>
+      <ymin>0</ymin>
+      <xmax>1159</xmax>
+      <ymax>42</ymax>
+    </bndbox>
+  </object>
+  <object>
+    <name>table row</name>
+    <bndbox>
+      <xmin>0</xmin>
+      <ymin>42</ymin>
+      <xmax>1159</xmax>
+      <ymax>82</ymax>
+    </bndbox>
+  </object>
+  <object>
+    <name>table row</name>
+    <bndbox>
+      <xmin>0</xmin>
+      <ymin>82</ymin>
+      <xmax>1159</xmax>
+      <ymax>115</ymax>
+    </bndbox>
+  </object>
+  <object>
+    <name>table row</name>
+    <bndbox>
+      <xmin>0</xmin>
+      <ymin>115</ymin>
+      <xmax>1159</xmax>
+      <ymax>147</ymax>
+    </bndbox>
+  </object>
+  <object>
+    <name>table row</name>
+    <bndbox>
+      <xmin>0</xmin>
+      <ymin>147</ymin>
+      <xmax>1159</xmax>
+      <ymax>191</ymax>
+    </bndbox>
+  </object>
+  <object>
+    <name>table column</name>
+    <bndbox>
+      <xmin>0</xmin>
+      <ymin>0</ymin>
+      <xmax>815</xmax>
+      <ymax>191</ymax>
+    </bndbox>
+  </object>
+  <object>
+    <name>table column</name>
+    <bndbox>
+      <xmin>815</xmin>
+      <ymin>0</ymin>
+      <xmax>1159</xmax>
+      <ymax>191</ymax>
+    </bndbox>
+  </object>
+</annotation>

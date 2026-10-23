@@ -201,5 +201,41 @@ def render(input, max_w: int = 1000, mode:str = "geometry", min_w: int = 40, row
         result = _render_cells(cells, min_w=min_w, row_h=row_h, margin=margin)
         result.save(os.path.join(dir, "visualize_html.png"))
 
-    
+def _render_bboxs_test(schema, image:Image, max_width:int = 1000, margin:int = 10) -> Image.Image:
+    # filter lọc lỗi, có thể bỏ sau khi có postprocess
+    no_fill = image is None
+    cells = schema["ocr"]
+    if not cells:
+        raise ValueError("No valid cells to render!")
+    if image is None:
+        ox = min(c["bbox"][0] for c in cells)
+        oy = min(c["bbox"][1] for c in cells)
+        tw = max(c["bbox"][2] for c in cells) - ox
+        th = max(c["bbox"][3] for c in cells) - oy
+        scale = min(1.0, max_width / tw) if tw > 0 else 1.0
+        image = Image.new("RGB", (int(tw * scale) + 2 * margin, int(th * scale) + 2 * margin), (255, 255, 255))
+    else:
+        scale = 1
+        margin = 0
+        ox = 0
+        oy = 0
+        tw = 0
+        th = 0
+    draw = ImageDraw.Draw(image)
+    for cell in cells:
+        x1, y1, x2, y2 = cell["bbox"]
+        a = (x1 - ox) * scale + margin
+        b = (y1 - oy) * scale + margin
+        c = (x2 - ox) * scale + margin
+        d = (y2 - oy) * scale + margin
+        if no_fill:
+            draw.rectangle([a,b,c,d], outline=(0,0,0), width=2)
+        else:
+            draw.rectangle([a,b,c,d], outline=LINE, width=2)
+    return image
 
+if __name__ == "__main__":
+    with open(r"D:\DACN\EVF_CN_2023_21.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
+    image = Image.open(r"D:\DACN\EVF_CN_2023_21.jpg")
+    _render_bboxs_test(data,image).save(r"D:\DACN\test.jpg")
