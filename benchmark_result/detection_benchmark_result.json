@@ -6,5 +6,10 @@
         "table": 0.9900588887402839,
         "table rotated": 1.0
     },
-    "Time per sample": 0.04433
+    "mAP50_95": 0.9694070022751308,
+    "AP5095_per_class": {
+        "table": 0.9754554842333816,
+        "table rotated": 0.96335852031688
+    },
+    "time": 35.8
 }
