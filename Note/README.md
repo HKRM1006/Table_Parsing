@@ -29,13 +29,13 @@ Qua kết quả thử nghiệm sơ bộ mô hình Yolov26n đặt độ chính x
 
 Các lỗi chủ yếu mà mô hình YOLO mắc phải:
 
-- Mô hình nhận diện bảng nằm trong Figure: đây là lỗi do mô hình huấn luyện đơn thuần để nhận diện bảng, không gây ảnh hưởng tới bài toán hiện tại.
-  ![1792686811613](images/README/1792686811613.png)
-- Nhầm lẫn bảng dữ liệu và các thông tin có định dạng giống bảng:
-  ![1792687374741](images/README/1792687374741.png)
-  ![1792687402183](images/README/1792687402183.png)
-- Sai hoàn toàn
-  ![1792687470287](images/README/1792687470287.png)
+Mô hình nhận diện bảng nằm trong Figure: đây là lỗi do mô hình huấn luyện đơn thuần để nhận diện bảng, không gây ảnh hưởng tới bài toán hiện tại. 
+![1792686811613](images/README/1792686811613.png)
+Nhầm lẫn bảng dữ liệu và các thông tin có định dạng giống bảng:
+![1792687374741](images/README/1792687374741.png)
+![1792687402183](images/README/1792687402183.png)
+Sai hoàn toàn
+![1792687470287](images/README/1792687470287.png)
 
 # Kết quả so sánh Yolo26n và Baseline TATR
 
